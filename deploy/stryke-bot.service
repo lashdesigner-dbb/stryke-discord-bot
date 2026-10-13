@@ -1,0 +1,24 @@
+[Unit]
+Description=STRYKE Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stryke
+Group=stryke
+WorkingDirectory=/opt/stryke-bot
+EnvironmentFile=/etc/stryke-bot.env
+Environment=STRYKE_DATA_DIR=/var/lib/stryke-bot
+ExecStart=/opt/stryke-bot/.venv/bin/python /opt/stryke-bot/main.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/stryke-bot
+
+[Install]
+WantedBy=multi-user.target

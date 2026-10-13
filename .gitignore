@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+bot_state.json
+meta_state.json
+meta_state.json.tmp
+*.log
+run-logs/
+deploy/*.zip
+.clear-test-tmp/
