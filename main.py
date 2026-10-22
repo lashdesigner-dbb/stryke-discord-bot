@@ -111,6 +111,8 @@ def find_identification_storage_channel(guild: discord.Guild) -> discord.TextCha
 class StrykeBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
+        # Needed to archive identification messages sent manually in the dedicated channel.
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -152,6 +154,44 @@ class StrykeBot(commands.Bot):
             await reconcile_meta_state(guild)
         if not refresh_site_meta_cache.is_running():
             refresh_site_meta_cache.start()
+
+    async def on_message(self, message: discord.Message):
+        if (
+            message.guild is None
+            or message.author.bot
+            or not isinstance(message.channel, discord.TextChannel)
+        ):
+            return
+
+        public_channel = find_text_channel(message.guild, IDENTIFICATION_NAME)
+        if public_channel is None or message.channel.id != public_channel.id:
+            return
+
+        storage_channel = find_identification_storage_channel(message.guild)
+        if storage_channel is None:
+            log.error(
+                "Identificação manual %s permanece no canal público porque o arquivo privado não está disponível.",
+                message.id,
+            )
+            return
+
+        async with IDENTIFICATION_LOCK:
+            if not await self.archive_manual_identification_message(message, storage_channel):
+                return
+            try:
+                await message.delete(reason="Guardar identificação manual no canal privado do STRYKE")
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                log.warning(
+                    "Identificação manual %s foi arquivada, mas não consegui removê-la do canal público.",
+                    message.id,
+                )
+            except discord.HTTPException:
+                log.exception(
+                    "Identificação manual %s foi arquivada, mas falhei ao removê-la do canal público.",
+                    message.id,
+                )
 
     def restore_absence_cleanup(self, guild: discord.Guild) -> None:
         now = datetime.now(timezone.utc)
@@ -269,39 +309,117 @@ class StrykeBot(commands.Bot):
         save_state(state)
         return channel
 
+    async def archive_manual_identification_message(
+        self,
+        source_message: discord.Message,
+        storage_channel: discord.TextChannel,
+        archived_source_ids: set[str] | None = None,
+    ) -> bool:
+        source_id = str(source_message.id)
+        if archived_source_ids is not None and source_id in archived_source_ids:
+            return True
+
+        source_marker = f"STRYKE-ID-ARCHIVE-SOURCE:{source_id}"
+        if archived_source_ids is None:
+            async for saved_message in storage_channel.history(limit=None):
+                if any(embed.footer and embed.footer.text == source_marker for embed in saved_message.embeds):
+                    return True
+
+        if len(source_message.embeds) > 9:
+            log.error("Identificação manual %s tem mais de 9 embeds; mantive a mensagem original.", source_id)
+            return False
+
+        copied_files = []
+        try:
+            for attachment in source_message.attachments:
+                copied_files.append(await attachment.to_file(use_cached=True))
+
+            content = source_message.content.strip()
+            if content:
+                description = content[:4000]
+            elif source_message.stickers:
+                sticker_names = ", ".join(sticker.name for sticker in source_message.stickers)
+                description = f"Mensagem com sticker(s): {sticker_names}"
+            else:
+                description = "Mensagem enviada sem texto; consulte os anexos ou conteúdos incorporados abaixo."
+
+            archived_embed = discord.Embed(
+                title="🗂️ Identificação enviada fora do formulário",
+                description=description,
+                color=discord.Color.dark_teal(),
+                timestamp=source_message.created_at,
+            )
+            archived_embed.add_field(
+                name="Enviado por",
+                value=f"{source_message.author.display_name} (ID {source_message.author.id})",
+                inline=False,
+            )
+            archived_embed.add_field(
+                name="Mensagem original",
+                value=f"Canal #{source_message.channel.name} · ID {source_id}",
+                inline=False,
+            )
+            archived_embed.set_footer(text=source_marker)
+            copied_embeds = [embed.copy() for embed in source_message.embeds]
+            await storage_channel.send(
+                embeds=[archived_embed, *copied_embeds],
+                files=copied_files,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            if archived_source_ids is not None:
+                archived_source_ids.add(source_id)
+            return True
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Não foi possível arquivar a identificação manual %s; a mensagem original será preservada.", source_id)
+            return False
+
     async def archive_public_identifications(
         self,
         public_channel: discord.TextChannel,
         storage_channel: discord.TextChannel,
     ) -> bool:
-        record_pattern = re.compile(r"^🪪 Cadastro de identificação #(\d+)$")
+        record_pattern = re.compile(r"^🪪 Cadastro de identificação #(\\d+)$")
+        source_pattern = re.compile(r"^STRYKE-ID-ARCHIVE-SOURCE:(\\d+)$")
         archived_numbers: set[str] = set()
+        archived_source_ids: set[str] = set()
         try:
             async for saved_message in storage_channel.history(limit=None):
                 for embed in saved_message.embeds:
                     match = record_pattern.match(embed.title or "")
                     if match:
                         archived_numbers.add(match.group(1))
+                    footer = embed.footer.text if embed.footer else ""
+                    source_match = source_pattern.match(footer)
+                    if source_match:
+                        archived_source_ids.add(source_match.group(1))
 
             async for message in public_channel.history(limit=None, oldest_first=True):
-                if message.author != self.user:
+                if message.author == self.user:
+                    for embed in message.embeds:
+                        match = record_pattern.match(embed.title or "")
+                        if not match or match.group(1) in archived_numbers:
+                            continue
+                        # Copy each existing form registration before public cleanup.
+                        await storage_channel.send(
+                            embed=embed.copy(),
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                        archived_numbers.add(match.group(1))
                     continue
-                for embed in message.embeds:
-                    match = record_pattern.match(embed.title or "")
-                    if not match or match.group(1) in archived_numbers:
-                        continue
-                    # Copy each existing registration before the public channel is purged.
-                    await storage_channel.send(
-                        embed=embed.copy(),
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
-                    archived_numbers.add(match.group(1))
+                if message.author.bot:
+                    continue
+                if not await self.archive_manual_identification_message(
+                    message,
+                    storage_channel,
+                    archived_source_ids,
+                ):
+                    return False
             return True
         except discord.Forbidden:
-            log.exception("Não foi possível ler ou arquivar os cadastros antes da limpeza do canal público.")
+            log.exception("Não foi possível ler ou arquivar as identificações antes da limpeza do canal público.")
             return False
         except discord.HTTPException:
-            log.exception("Falha ao arquivar os cadastros; as mensagens públicas serão preservadas.")
+            log.exception("Falha ao arquivar as identificações; as mensagens públicas serão preservadas.")
             return False
 
     async def ensure_identification_panel(self, guild: discord.Guild) -> bool:
