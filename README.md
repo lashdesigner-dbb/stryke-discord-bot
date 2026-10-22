@@ -38,7 +38,7 @@ O arquivo `deploy/stryke-bot-windows.zip` inclui o código e `deploy/start-windo
 
 ## Developer Portal e instalação
 
-1. Em **Bot**, gere/copiei o token e habilite o bot. Não habilite intents privilegiadas: este bot não precisa ler conteúdo geral das mensagens nem consultar a lista de membros.
+1. Em **Bot**, gere/copiei o token e habilite o bot. Ative **Message Content Intent** para o bot ler identificações enviadas manualmente no canal dedicado. O código só arquiva mensagens do canal `📝 identificação`; não habilite intents de membros ou presença.
 2. Em **OAuth2 → URL Generator**, selecione os escopos `bot` e `applications.commands`.
 3. Permissões necessárias: View Channels, Manage Channels, Manage Roles, Manage Nicknames, Send Messages, Read Message History e Embed Links. O cargo do bot deve ficar acima de `Membro` na hierarquia do servidor. Attach Files não é necessário para o bot: o membro pode enviar prints nos tickets privados. Não selecione Administrator. Algumas telas do Discord podem requerer permissões administrativas próprias para autorizar a instalação no servidor.
 4. Abra o link gerado, escolha o servidor correto e confirme a autorização. A instalação exige que sua conta tenha permissão para adicionar aplicativos.
@@ -70,7 +70,7 @@ O fechamento semanal exige os cargos autorizados para resetar a meta. Após a co
 
 No canal público `📝 identificação`, o bot mantém somente o painel **Preencher identificação**. Os cadastros são publicados no canal privado `#identificacoes`, que o bot cria se não existir. O acesso de leitura é dado ao cargo `Gerente`/`Gerentes` (ou `Manager`/`Managers`) e a todos os cargos acima dele; `@everyone` não consegue ver o canal. Se o cargo tiver outro nome, configure `IDENTIFICATION_MANAGER_ROLE_ID` com o ID do cargo.
 
-Quando o bot iniciar, ele copia os cadastros já publicados para o canal privado e, somente depois de confirmar o arquivamento, apaga as outras mensagens do canal público, mantendo o painel. Se não conseguir identificar o cargo de gerente, proteger o canal ou arquivar os cadastros, ele não limpa o canal público. Novos cadastros vão diretamente para `#identificacoes`, atribuem o cargo `Membro` e definem o apelido com o campo **Nome** (até 32 caracteres). O contador continua salvo entre reinicializações.
+Quando o bot iniciar, ele copia os cadastros do formulário e as mensagens enviadas manualmente no canal público para o canal privado. Nas mensagens manuais, preserva texto, anexos e embeds junto com o nome e ID de quem enviou. Só depois de confirmar o arquivamento, apaga as outras mensagens do canal público, mantendo o painel. Depois da inicialização, novas identificações manuais são arquivadas no canal privado e removidas do canal público; se o arquivo falhar, a mensagem original permanece. Se não conseguir identificar o cargo de gerente ou proteger o canal, o bot não limpa o canal público. Novos cadastros do formulário vão diretamente para `#identificacoes`, atribuem o cargo `Membro` e definem o apelido com o campo **Nome** (até 32 caracteres). O contador continua salvo entre reinicializações.
 
 O bot precisa de Ver canal, Ver histórico de mensagens e Enviar mensagens/links no canal público, Gerenciar canais e Gerenciar cargos para criar e proteger `#identificacoes`, além de Gerenciar cargos e Gerenciar apelidos para concluir a identificação. O cargo do bot precisa ficar acima do cargo `Gerente` e dos cargos cuja permissão de leitura será configurada.
 
@@ -104,7 +104,7 @@ Qualquer pessoa com acesso ao ticket pode usar `/registrar-farme` para informar 
 
 ## Permissões OAuth2
 
-O bot usa `bot` + `applications.commands`. Permissões: View Channels, Manage Channels, Manage Roles, Manage Nicknames, Send Messages, Read Message History e Embed Links (inteiro de permissões `402738192`). Mantenha o cargo do bot acima de `Membro`, `Gerente` e dos cargos superiores para que ele possa configurar o canal privado de identificação. Não precisa de Administrator nem de Message Content Intent. O escopo `applications.commands` permite os comandos de barra.
+O bot usa `bot` + `applications.commands`. Permissões: View Channels, Manage Channels, Manage Roles, Manage Nicknames, Send Messages, Read Message History e Embed Links (inteiro de permissões `402738192`). Mantenha o cargo do bot acima de `Membro`, `Gerente` e dos cargos superiores para que ele possa configurar o canal privado de identificação. Não precisa de Administrator. Para capturar mensagens manuais, ative **Message Content Intent** em Developer Portal → Bot; embora a intenção habilite o recebimento de conteúdo de mensagens do servidor, o código só processa o canal `📝 identificação`. O escopo `applications.commands` permite os comandos de barra.
 
 ## Diagnóstico
 
