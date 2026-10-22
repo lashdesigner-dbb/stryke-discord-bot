@@ -40,9 +40,9 @@ O arquivo `deploy/stryke-bot-windows.zip` inclui o código e `deploy/start-windo
 
 1. Em **Bot**, gere/copiei o token e habilite o bot. Não habilite intents privilegiadas: este bot não precisa ler conteúdo geral das mensagens nem consultar a lista de membros.
 2. Em **OAuth2 → URL Generator**, selecione os escopos `bot` e `applications.commands`.
-3. Permissões mínimas: View Channels, Manage Channels, Send Messages, Read Message History e Embed Links. Attach Files não é necessário para o bot: o membro pode enviar prints nos tickets privados. Não selecione Administrator. Algumas telas do Discord podem requerer permissões administrativas próprias para autorizar a instalação no servidor.
+3. Permissões necessárias: View Channels, Manage Channels, Manage Roles, Manage Nicknames, Send Messages, Read Message History e Embed Links. O cargo do bot deve ficar acima de `Membro` na hierarquia do servidor. Attach Files não é necessário para o bot: o membro pode enviar prints nos tickets privados. Não selecione Administrator. Algumas telas do Discord podem requerer permissões administrativas próprias para autorizar a instalação no servidor.
 4. Abra o link gerado, escolha o servidor correto e confirme a autorização. A instalação exige que sua conta tenha permissão para adicionar aplicativos.
-5. O Application ID da aplicação STRYKE.BOT já está configurado localmente em `DISCORD_CLIENT_ID`. O link preparado, com os escopos `bot` e `applications.commands` e permissões mínimas, é: https://discord.com/oauth2/authorize?client_id=1558161268748324935&permissions=85008&scope=bot%20applications.commands. Abra-o, escolha o servidor e confirme a instalação. Nunca copie o token para o código.
+5. O Application ID da aplicação STRYKE.BOT já está configurado localmente em `DISCORD_CLIENT_ID`. O link preparado, com os escopos `bot` e `applications.commands` e as permissões necessárias, é: https://discord.com/oauth2/authorize?client_id=1558161268748324935&permissions=402738192&scope=bot%20applications.commands. Abra-o, escolha o servidor e confirme a instalação se precisar conceder permissões novas. Nunca copie o token para o código.
 
 O projeto não usa APIs não oficiais nem automatiza login/autorização. A autorização no portal e a seleção do servidor são feitas pelo proprietário/admin.
 
@@ -68,7 +68,7 @@ O fechamento semanal exige os cargos autorizados para resetar a meta. Após a co
 
 ## Formulário de identificação
 
-No canal `📝 identificação`, o bot mantém um painel com botão **Preencher identificação**. Qualquer membro pode abrir o modal com os campos **Nome**, **Vulgo**, **Passaporte**, **Cell (in game)** e **Recrutador**. Ao enviar, o bot publica o cadastro numerado em sequência nesse mesmo canal e confirma o envio em uma resposta privada. O contador fica salvo entre reinicializações. O bot precisa de Ver canal, Ver histórico de mensagens e Enviar mensagens/links no canal.
+No canal `📝 identificação`, o bot mantém um painel com botão **Preencher identificação**. Qualquer membro pode abrir o modal com os campos **Nome**, **Vulgo**, **Passaporte**, **Cell (in game)** e **Recrutador**. Ao enviar, o bot publica o cadastro numerado em sequência nesse mesmo canal, atribui o cargo `Membro` e define o apelido com o valor de **Nome** (até 32 caracteres). O contador fica salvo entre reinicializações. O bot precisa de Ver canal, Ver histórico de mensagens e Enviar mensagens/links no canal, além de Gerenciar cargos e Gerenciar apelidos no servidor.
 
 ## Hospedar no Google Cloud Free Tier
 
@@ -100,7 +100,7 @@ Qualquer pessoa com acesso ao ticket pode usar `/registrar-farme` para informar 
 
 ## Permissões OAuth2
 
-O bot usa `bot` + `applications.commands`. Permissões: View Channels, Manage Channels, Send Messages, Read Message History e Embed Links (inteiro de permissões `85008`). Não precisa de Administrator nem de Message Content Intent. O escopo `applications.commands` permite os comandos de barra.
+O bot usa `bot` + `applications.commands`. Permissões: View Channels, Manage Channels, Manage Roles, Manage Nicknames, Send Messages, Read Message History e Embed Links (inteiro de permissões `402738192`). Mantenha o cargo do bot acima de `Membro`. Não precisa de Administrator nem de Message Content Intent. O escopo `applications.commands` permite os comandos de barra.
 
 ## Diagnóstico
 
