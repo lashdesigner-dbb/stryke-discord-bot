@@ -68,7 +68,11 @@ O fechamento semanal exige os cargos autorizados para resetar a meta. Após a co
 
 ## Formulário de identificação
 
-No canal `📝 identificação`, o bot mantém um painel com botão **Preencher identificação**. Qualquer membro pode abrir o modal com os campos **Nome**, **Vulgo**, **Passaporte**, **Cell (in game)** e **Recrutador**. Ao enviar, o bot publica o cadastro numerado em sequência nesse mesmo canal, atribui o cargo `Membro` e define o apelido com o valor de **Nome** (até 32 caracteres). O contador fica salvo entre reinicializações. O bot precisa de Ver canal, Ver histórico de mensagens e Enviar mensagens/links no canal, além de Gerenciar cargos e Gerenciar apelidos no servidor.
+No canal público `📝 identificação`, o bot mantém somente o painel **Preencher identificação**. Os cadastros são publicados no canal privado `#identificacoes`, que o bot cria se não existir. O acesso de leitura é dado ao cargo `Gerente`/`Gerentes` (ou `Manager`/`Managers`) e a todos os cargos acima dele; `@everyone` não consegue ver o canal. Se o cargo tiver outro nome, configure `IDENTIFICATION_MANAGER_ROLE_ID` com o ID do cargo.
+
+Quando o bot iniciar, ele copia os cadastros já publicados para o canal privado e, somente depois de confirmar o arquivamento, apaga as outras mensagens do canal público, mantendo o painel. Se não conseguir identificar o cargo de gerente, proteger o canal ou arquivar os cadastros, ele não limpa o canal público. Novos cadastros vão diretamente para `#identificacoes`, atribuem o cargo `Membro` e definem o apelido com o campo **Nome** (até 32 caracteres). O contador continua salvo entre reinicializações.
+
+O bot precisa de Ver canal, Ver histórico de mensagens e Enviar mensagens/links no canal público, Gerenciar canais e Gerenciar cargos para criar e proteger `#identificacoes`, além de Gerenciar cargos e Gerenciar apelidos para concluir a identificação. O cargo do bot precisa ficar acima do cargo `Gerente` e dos cargos cuja permissão de leitura será configurada.
 
 ## Hospedar no Google Cloud Free Tier
 
@@ -100,7 +104,7 @@ Qualquer pessoa com acesso ao ticket pode usar `/registrar-farme` para informar 
 
 ## Permissões OAuth2
 
-O bot usa `bot` + `applications.commands`. Permissões: View Channels, Manage Channels, Manage Roles, Manage Nicknames, Send Messages, Read Message History e Embed Links (inteiro de permissões `402738192`). Mantenha o cargo do bot acima de `Membro`. Não precisa de Administrator nem de Message Content Intent. O escopo `applications.commands` permite os comandos de barra.
+O bot usa `bot` + `applications.commands`. Permissões: View Channels, Manage Channels, Manage Roles, Manage Nicknames, Send Messages, Read Message History e Embed Links (inteiro de permissões `402738192`). Mantenha o cargo do bot acima de `Membro`, `Gerente` e dos cargos superiores para que ele possa configurar o canal privado de identificação. Não precisa de Administrator nem de Message Content Intent. O escopo `applications.commands` permite os comandos de barra.
 
 ## Diagnóstico
 

@@ -1,5 +1,5 @@
-Warning: truncated output (original token count: 21160)
-Total output lines: 1634
+Warning: truncated output (original token count: 23325)
+Total output lines: 1808
 
 from __future__ import annotations
 
@@ -43,6 +43,9 @@ log = logging.getLogger("stryke")
 PANEL_NAME = "『🤖』bot-abrir-chamado"
 ABSENCE_NAME = "『😴』ᴀᴜsᴇɴᴄɪᴀs"
 IDENTIFICATION_NAME = "📝 identificação"
+IDENTIFICATION_STORAGE_NAME = "identificacoes"
+IDENTIFICATION_STORAGE_TOPIC = "stryke:private-identifications:v1"
+IDENTIFICATION_MANAGER_ROLE_NAMES = {"gerente", "gerentes", "manager", "managers"}
 FARME_CATEGORY_HINTS = ("farme",)
 FARME_ROLE_NAMES = ("🚀 LÍDER", "🔥 SUB LÍDER", "[RESP] FARME")
 PANEL_MARKER = "stryke:permanent-ticket-panel:v1"
@@ -72,6 +75,40 @@ def is_farme_ticket(channel: discord.abc.GuildChannel) -> bool:
         and topic.startswith("STRYKE Farme ticket;")
         and re.search(r"(?:^|; )owner_id=\d+(?:;|$)", topic) is not None
     )
+
+
+def identification_manager_roles(guild: discord.Guild) -> tuple[discord.Role | None, list[discord.Role]]:
+    configured_id = os.getenv("IDENTIFICATION_MANAGER_ROLE_ID", "").strip()
+    if configured_id.isdigit():
+        manager_role = guild.get_role(int(configured_id))
+        if manager_role is None or manager_role == guild.default_role:
+            return None, []
+    else:
+        matches = [role for role in guild.roles if norm(role.name) in IDENTIFICATION_MANAGER_ROLE_NAMES]
+        if not matches:
+            return None, []
+        # If there are duplicate manager roles, include the full range beginning
+        # at the lowest one so no manager is accidentally excluded.
+        manager_role = min(matches, key=lambda role: role.position)
+    allowed_roles = [
+        role for role in guild.roles
+        if role != guild.default_role and role.position >= manager_role.position
+    ]
+    return manager_role, allowed_roles
+
+
+def find_identification_storage_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    state = load_state().get(str(guild.id), {})
+    configured_id = str(state.get("identification_storage_channel_id", "")).strip()
+    if configured_id.isdigit():
+        channel = guild.get_channel(int(configured_id))
+        if isinstance(channel, discord.TextChannel):
+            return channel
+    marked = [channel for channel in guild.text_channels if channel.topic == IDENTIFICATION_STORAGE_TOPIC]
+    if len(marked) == 1:
+        return marked[0]
+    named = [channel for channel in guild.text_channels if norm(channel.name) == norm(IDENTIFICATION_STORAGE_NAME)]
+    return named[0] if len(named) == 1 else None
 
 
 class StrykeBot(commands.Bot):
@@ -164,47 +201,184 @@ class StrykeBot(commands.Bot):
             log.exception("Falha ao garantir painel: %s", exc)
             return False
 
+    async def ensure_identification_storage_channel(
+        self,
+        guild: discord.Guild,
+        public_channel: discord.TextChannel | None,
+    ) -> discord.TextChannel | None:
+        manager_role, manager_roles = identification_manager_roles(guild)
+        if manager_role is None:
+            log.error(
+                "Cargo Gerente não encontrado; defina IDENTIFICATION_MANAGER_ROLE_ID ou crie um cargo Gerente. "
+                "O canal público de identificação não será limpo."
+            )
+            return None
+        bot_member = guild.me
+        if bot_member is None:
+            log.error("Não foi possível localizar o membro do bot para configurar o canal privado de identificação.")
+            return None
+
+        overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
+        for role in manager_roles:
+            overwrites[role] = discord.PermissionOverwrite(
+                view_channel=True,
+                read_message_history=True,
+                send_messages=False,
+            )
+        overwrites[bot_member] = discord.PermissionOverwrite(
+            view_channel=True,
+            read_message_history=True,
+            send_messages=True,
+            embed_links=True,
+        )
+
+        channel = find_identification_storage_channel(guild)
+        if channel is None:
+            named_matches = [
+                candidate for candidate in guild.text_channels
+                if norm(candidate.name) == norm(IDENTIFICATION_STORAGE_NAME)
+            ]
+            if named_matches:
+                log.error(
+                    "Há mais de um canal chamado %s e não consegui identificar com segurança o canal privado de identificação.",
+                    IDENTIFICATION_STORAGE_NAME,
+                )
+                return None
+        try:
+            if channel is None:
+                channel = await guild.create_text_channel(
+                    name=IDENTIFICATION_STORAGE_NAME,
+                    category=public_channel.category if public_channel else None,
+                    topic=IDENTIFICATION_STORAGE_TOPIC,
+                    overwrites=overwrites,
+                    reason="Canal privado para guardar os cadastros de identificação do STRYKE",
+                )
+                log.info("Canal privado de identificações criado: %s (ID %s).", channel.name, channel.id)
+            else:
+                await channel.edit(
+                    topic=IDENTIFICATION_STORAGE_TOPIC,
+                    overwrites=overwrites,
+                    reason="Restringir os cadastros de identificação a Gerente e cargos superiores",
+                )
+        except discord.Forbidden:
+            log.exception("Sem permissão para criar ou proteger o canal privado de identificação.")
+            return None
+        except discord.HTTPException:
+            log.exception("Falha ao criar ou atualizar o canal privado de identificação.")
+            return None
+
+        state = load_state()
+        state.setdefault(str(guild.id), {})["identification_storage_channel_id"] = channel.id
+        save_state(state)
+        return channel
+
+    async def archive_public_identifications(
+        self,
+        public_channel: discord.TextChannel,
+        storage_channel: discord.TextChannel,
+    ) -> bool:
+        record_pattern = re.compile(r"^🪪 Cadastro de identificação #(\d+)$")
+        archived_numbers: set[str] = set()
+        try:
+            async for saved_message in storage_channel.history(limit=None):
+                for embed in saved_message.embeds:
+                    match = record_pattern.match(embed.title or "")
+                    if match:
+                        archived_numbers.add(match.group(1))
+
+            async for message in public_channel.history(limit=None, oldest_first=True):
+                if message.author != self.user:
+                    continue
+                for embed in message.embeds:
+                    match = record_pattern.match(embed.title or "")
+                    if not match or match.group(1) in archived_numbers:
+                        continue
+                    # Copy each existing registration before the public channel is purged.
+                    await storage_channel.send(
+                        embed=embed.copy(),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    archived_numbers.add(match.group(1))
+            return True
+        except discord.Forbidden:
+            log.exception("Não foi possível ler ou arquivar os cadastros antes da limpeza do canal público.")
+            return False
+        except discord.HTTPException:
+            log.exception("Falha ao arquivar os cadastros; as mensagens públicas serão preservadas.")
+            return False
+
     async def ensure_identification_panel(self, guild: discord.Guild) -> bool:
         channel = find_text_channel(guild, IDENTIFICATION_NAME)
+        storage_channel = await self.ensure_identification_storage_channel(guild, channel)
         if channel is None:
             log.warning("Canal de identificação não encontrado: %s", IDENTIFICATION_NAME)
             return False
-        try:
-            state = load_state()
-            saved = state.get(str(guild.id), {}).get("identification_panel_message_id")
-            message = None
-            if saved:
-                try:
-                    message = await channel.fetch_message(int(saved))
-                except (discord.NotFound, discord.Forbidden, ValueError):
-                    message = None
-            if message is None:
-                async for candidate in channel.history(limit=100):
-                    if candidate.author == self.user and any(
-                        embed.footer and embed.footer.text == IDENTIFICATION_PANEL_MARKER
-                        for embed in candidate.embeds
-                    ):
-                        message = candidate
-                        break
-            embed = discord.Embed(
-                title="🪪 Cadastro de identificação",
-                description="Clique no botão abaixo e preencha seus dados. O cadastro será publicado neste canal.",
-                color=discord.Color.blurple(),
-            )
-            embed.set_footer(text=IDENTIFICATION_PANEL_MARKER)
-            if message:
-                await message.edit(embed=embed, view=IdentificationPanelView())
-            else:
-                message = await channel.send(embed=embed, view=IdentificationPanelView())
-            state.setdefault(str(guild.id), {})["identification_panel_message_id"] = message.id
-            save_state(state)
-            return True
-        except discord.Forbidden:
-            log.error("Sem permissão para publicar no canal de identificação %s.", channel.name)
+        if storage_channel is None:
             return False
-        except discord.HTTPException:
-            log.exception("Falha ao garantir painel de identificação no canal %s.", channel.name)
-            return False
+        async with IDENTIFICATION_LOCK:
+            try:
+                bot_member = guild.me
+                if bot_member is None:
+                    log.error("Não foi possível localizar o membro do bot no servidor %s.", guild.id)
+                    return False
+                # Grant deletion only in this one public identification channel.
+                await channel.set_permissions(
+                    bot_member,
+                    overwrite=discord.PermissionOverwrite(
+                        view_channel=True,
+                        read_message_history=True,
+                        send_messages=True,
+                        embed_links=True,
+                        manage_messages=True,
+                    ),
+                    reason="Permitir que o STRYKE mantenha apenas o painel público de identificação",
+                )
+
+                state = load_state()
+                saved = state.get(str(guild.id), {}).get("identification_panel_message_id")
+                message = None
+                if saved:
+                    try:
+                        message = await channel.fetch_message(int(saved))
+                    except (discord.NotFound, discord.Forbidden, ValueError):
+                        message = None
+                if message is None:
+                    async for candidate in channel.history(limit=100):
+                        if candidate.author == self.user and any(
+                            embed.footer and embed.footer.text == IDENTIFICATION_PANEL_MARKER
+                            for embed in candidate.embeds
+                        ):
+                            message = candidate
+                            break
+                embed = discord.Embed(
+                    title="🪪 Cadastro de identificação",
+                    description="Clique no botão abaixo e preencha seus dados. A equipe poderá consultar o cadastro no canal privado de identificações.",
+                    color=discord.Color.blurple(),
+                )
+                embed.set_footer(text=IDENTIFICATION_PANEL_MARKER)
+                if message:
+                    await message.edit(embed=embed, view=IdentificationPanelView())
+                else:
+                    message = await channel.send(embed=embed, view=IdentificationPanelView())
+                state.setdefault(str(guild.id), {})["identification_panel_message_id"] = message.id
+                save_state(state)
+
+                if not await self.archive_public_identifications(channel, storage_channel):
+                    return False
+                deleted = await channel.purge(
+                    limit=None,
+                    check=lambda candidate: candidate.id != message.id,
+                    reason="Manter somente o painel público e guardar os cadastros no canal privado",
+                )
+                if deleted:
+                    log.info("Canal público de identificação limpo; painel mantido e %d mensagens removidas.", len(deleted))
+                return True
+            except discord.Forbidden:
+                log.exception("Sem permissão para manter o painel, arquivar cadastros ou limpar o canal %s.", channel.name)
+                return False
+            except discord.HTTPException:
+                log.exception("Falha ao atualizar o painel de identificação no canal %s.", channel.name)
+                return False
 
     async def ensure_weekly_meta_controls(self, guild: discord.Guild) -> bool:
         channel = find_meta_panel_channel(guild)
@@ -352,227 +526,7 @@ def new_meta_guild_state() -> dict:
         "cycle": 1,
         "phase": "family",
         "family_total_cents": 0,
-        "family_by_member": {},
-        "personal_total_cents": 0,
-        "personal_by_member": {},
-        "weekly_key": "",
-        "weekly_total_cents": 0,
-        "weekly_number": 1,
-        "weekly_start_at": "",
-        "weekly_end_at": "",
-        "weekly_history": [],
-        "submitted_by_member": {},
-        "completed_cycles": [],
-        "pending_family_thanks": False,
-        "panel_channel_id": None,
-        "panel_message_id": None,
-    }
-
-
-def current_meta_week_window() -> tuple[datetime, datetime]:
-    """Return the current Monday 14:00 to next Monday 14:00 interval."""
-    now = datetime.now(SAO_PAULO_TIMEZONE)
-    monday = now.date() - timedelta(days=now.weekday())
-    start = datetime.combine(monday, datetime_time(hour=14), tzinfo=SAO_PAULO_TIMEZONE)
-    if now < start:
-        start -= timedelta(days=7)
-    return start, start + timedelta(days=7)
-
-
-def sync_meta_week(state: dict) -> bool:
-    """Initialize week metadata for old state without resetting an open week."""
-    changed = False
-    raw_start = state.get("weekly_start_at")
-    raw_end = state.get("weekly_end_at")
-    try:
-        start = datetime.fromisoformat(raw_start) if raw_start else None
-    except (TypeError, ValueError):
-        start = None
-    try:
-        end = datetime.fromisoformat(raw_end) if raw_end else None
-    except (TypeError, ValueError):
-        end = None
-
-    if start is None:
-        old_key = str(state.get("weekly_key", ""))
-        try:
-            old_date = datetime.fromisoformat(old_key).date() if old_key else None
-        except ValueError:
-            old_date = None
-        if old_date:
-            start = datetime.combine(old_date, datetime_time(hour=14), tzinfo=SAO_PAULO_TIMEZONE)
-        else:
-            start, _ = current_meta_week_window()
-        state["weekly_start_at"] = start.isoformat()
-        changed = True
-    elif start.tzinfo is None:
-        start = start.replace(tzinfo=SAO_PAULO_TIMEZONE)
-        state["weekly_start_at"] = start.isoformat()
-        changed = True
-
-    if end is None or end <= start:
-        end = start + timedelta(days=7)
-        state["weekly_end_at"] = end.isoformat()
-        changed = True
-    elif end.tzinfo is None:
-        end = end.replace(tzinfo=SAO_PAULO_TIMEZONE)
-        state["weekly_end_at"] = end.isoformat()
-        changed = True
-
-    if state.get("weekly_key") != start.date().isoformat():
-        state["weekly_key"] = start.date().isoformat()
-        changed = True
-    if "weekly_number" not in state:
-        state["weekly_number"] = 1
-        changed = True
-    if "weekly_total_cents" not in state:
-        state["weekly_total_cents"] = 0
-        changed = True
-    if "weekly_history" not in state:
-        state["weekly_history"] = []
-        changed = True
-    return changed
-
-
-def weekly_period_label(state: dict) -> str:
-    sync_meta_week(state)
-    start = datetime.fromisoformat(state["weekly_start_at"])
-    end = datetime.fromisoformat(state["weekly_end_at"])
-    return format_week_dates(start, end)
-
-
-def format_week_dates(start: datetime, end: datetime) -> str:
-    if start.month == end.month and start.year == end.year:
-        return f"{start.day} ao {end.day}/{end.month:02d}"
-    return f"{start.day:02d}/{start.month:02d} ao {end.day:02d}/{end.month:02d}"
-
-
-def migrate_meta_guild_state(state: dict) -> bool:
-    if "phase" in state:
-        return False
-    previous_total = int(state.pop("current_total_cents", 0))
-    previous_members = dict(state.pop("by_member", {}))
-    completed = state.setdefault("completed_cycles", [])
-    family_wins = [entry for entry in completed if entry.get("reason") == "goal_reached" and int(entry.get("total_cents", 0)) >= META_GOAL_CENTS]
-    state.setdefault("submitted_by_member", {})
-    state.setdefault("pending_family_thanks", False)
-    if family_wins:
-        last_win = family_wins[-1]
-        state["cycle"] = int(last_win.get("cycle", max(1, int(state.get("cycle", 2)) - 1)))
-        state["phase"] = "personal"
-        state["family_total_cents"] = META_GOAL_CENTS
-        state["family_by_member"] = dict(last_win.get("by_member", {}))
-        state["personal_total_cents"] = 0
-        state["personal_by_member"] = {}
-        state["pending_family_thanks"] = True
-    else:
-        state["phase"] = "family"
-        state["family_total_cents"] = previous_total
-        state["family_by_member"] = previous_members
-        state["personal_total_cents"] = 0
-        state["personal_by_member"] = {}
-    return True
-
-
-def get_meta_guild_state(data: dict, guild_id: int) -> dict:
-    guilds = data.setdefault("guilds", {})
-    state = guilds.setdefault(str(guild_id), new_meta_guild_state())
-    migrate_meta_guild_state(state)
-    return state
-
-
-def parse_brl_cents(value: str) -> int:
-    raw = value.strip().lower().replace("r$", "").replace(" ", "")
-    if not raw or not re.fullmatch(r"[0-9.,]+", raw):
-        raise ValueError("Use um valor positivo, como 1500, 1.500,00 ou 1500.50.")
-    if "," in raw:
-        if raw.count(",") != 1:
-            raise ValueError("Formato de valor inválido.")
-        whole, fraction = raw.split(",", 1)
-        whole = whole.replace(".", "")
-        if len(fraction) > 2:
-            raise ValueError("Informe no máximo duas casas decimais.")
-        normalized = whole + ("." + fraction if fraction else "")
-    else:
-        if raw.count(".") > 1:
-            normalized = raw.replace(".", "")
-        elif "." in raw and len(raw.rsplit(".", 1)[1]) == 3:
-            normalized = raw.replace(".", "")
-        else:
-            normalized = raw
-    try:
-        amount = Decimal(normalized)
-    except InvalidOperation as exc:
-        raise ValueError("Formato de valor inválido.") from exc
-    if not amount.is_finite() or amount <= 0:
-        raise ValueError("O valor precisa ser maior que zero.")
-    cents = amount * 100
-    if cents != cents.to_integral_value():
-        raise ValueError("Informe no máximo duas casas decimais.")
-    return int(cents)
-
-
-def format_brl(cents: int) -> str:
-    whole, fraction = divmod(max(0, int(cents)), 100)
-    grouped = f"{whole:,}".replace(",", ".")
-    return f"R$ {grouped},{fraction:02d}"
-
-
-def meta_embed(guild_id: int) -> discord.Embed:
-    data = load_meta_state()
-    state = get_meta_guild_state(data, guild_id)
-    if sync_meta_week(state):
-        save_meta_state(data)
-    total = int(state.get("weekly_total_cents", 0))
-    site_total = state.get("site_total_cents")
-    site_count = int(state.get("site_goal_count", 0))
-    site_updated = state.get("site_updated_at")
-    site_summary = (
-        f"**Acumulado no site:** {format_brl(site_total)} · {site_count} cadastro(s)"
-        if site_total is not None
-        else "**Acumulado no site:** aguardando sincronização"
-    )
-    if site_updated:
-        try:
-            updated_at = datetime.fromisoformat(site_updated).astimezone(SAO_PAULO_TIMEZONE)
-            site_summary += f"\nAtualizado em {updated_at:%d/%m às %H:%M}"
-        except (TypeError, ValueError):
-            pass
-    embed = discord.Embed(
-        title=f"💰 SEMANA {int(state.get('weekly_number', 1))} · META DE FARME",
-        description=(
-            f"## {format_brl(total)}\n\n"
-            f"Período: **{weekly_period_label(state)} · segunda às 14h → segunda às 14h**\n\n"
-            f"{site_summary}"
-        ),
-        color=discord.Color.gold(),
-    )
-    embed.set_footer(text=META_PANEL_MARKER)
-    return embed
-
-
-def can_reset_meta(member: discord.Member) -> bool:
-    role_ids = {
-        int(value.strip())
-        for value in os.getenv("META_ADMIN_ROLE_IDS", "").split(",")
-        if value.strip().isdigit()
-    }
-    if role_ids:
-        return any(role.id in role_ids for role in member.roles)
-    role_id = os.getenv("META_ADMIN_ROLE_ID", "").strip()
-    if role_id.isdigit():
-        return any(role.id == int(role_id) for role in member.roles)
-    return member.guild_permissions.administrator or member.guild_permissions.manage_guild
-
-
-async def refresh_meta_panel(guild_id: int) -> None:
-    data = load_meta_state()
-    state = data.get("guilds", {}).get(str(guild_id), {})
-    channel_id = state.get("panel_channel_id")
-    message_id = state.get("panel_message_id")
-    guild = bot.get_guild(guild_id)
-    channel = guild.get_channel(int(channel_id)) if guild and channel_id else None
-    if not isinstance(channel, discord.TextChannel) or not messag…9160 tokens truncated… confira minha permissão e a hierarquia dos cargos")
+ …11325 tokens truncated…confira minha permissão e a hierarquia dos cargos")
                     log.exception("Sem permissão para atribuir o cargo Membro após identificação #%04d.", number)
                 except discord.HTTPException:
                     update_errors.append("o Discord não conseguiu atribuir o cargo `Membro`")
@@ -595,9 +549,9 @@ async def refresh_meta_panel(guild_id: int) -> None:
             nickname_updated = True
 
         if role_updated and nickname_updated:
-            message = f"Cadastro #{number:04d} enviado. Cargo `Membro` atribuído e apelido atualizado para **{nickname}**."
+            message = f"Cadastro #{number:04d} enviado para a equipe. Cargo `Membro` atribuído e apelido atualizado para **{nickname}**."
         else:
-            message = f"Cadastro #{number:04d} enviado para {destination.mention}, mas " + "; ".join(update_errors) + "."
+            message = f"Cadastro #{number:04d} enviado para a equipe, mas " + "; ".join(update_errors) + "."
         await interaction.followup.send(message, ephemeral=True)
 
 
