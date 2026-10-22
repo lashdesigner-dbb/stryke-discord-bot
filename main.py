@@ -76,6 +76,23 @@ def is_farme_ticket(channel: discord.abc.GuildChannel) -> bool:
 
 
 def identification_manager_roles(guild: discord.Guild) -> tuple[discord.Role | None, list[discord.Role]]:
+    configured_ids = os.getenv("IDENTIFICATION_MANAGER_ROLE_IDS", "").strip()
+    if configured_ids:
+        role_ids = [value.strip() for value in re.split(r"[,;\s]+", configured_ids) if value.strip()]
+        if not role_ids or any(not role_id.isdigit() for role_id in role_ids):
+            return None, []
+        allowed_roles = []
+        for role_id in role_ids:
+            role = guild.get_role(int(role_id))
+            if role is None or role == guild.default_role:
+                return None, []
+            if role not in allowed_roles:
+                allowed_roles.append(role)
+        # A configured list is an exact allowlist, so every supplied role gets
+        # access without granting it to unrelated roles between hierarchy levels.
+        manager_role = min(allowed_roles, key=lambda role: role.position)
+        return manager_role, allowed_roles
+
     configured_id = os.getenv("IDENTIFICATION_MANAGER_ROLE_ID", "").strip()
     if configured_id.isdigit():
         manager_role = guild.get_role(int(configured_id))
