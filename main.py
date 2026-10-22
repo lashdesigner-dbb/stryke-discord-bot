@@ -378,8 +378,8 @@ class StrykeBot(commands.Bot):
         public_channel: discord.TextChannel,
         storage_channel: discord.TextChannel,
     ) -> bool:
-        record_pattern = re.compile(r"^🪪 Cadastro de identificação #(\\d+)$")
-        source_pattern = re.compile(r"^STRYKE-ID-ARCHIVE-SOURCE:(\\d+)$")
+        record_pattern = re.compile(r"^🪪 Cadastro de identificação #(\d+)$")
+        source_pattern = re.compile(r"^STRYKE-ID-ARCHIVE-SOURCE:(\d+)$")
         archived_numbers: set[str] = set()
         archived_source_ids: set[str] = set()
         try:
