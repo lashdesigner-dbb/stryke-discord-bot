@@ -23,6 +23,7 @@ DATA_DIR = Path(os.getenv("STRYKE_DATA_DIR", "").strip() or str(ROOT)).expanduse
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+CAPTURE_MANUAL_IDENTIFICATIONS = os.getenv("CAPTURE_MANUAL_IDENTIFICATIONS", "false").strip().lower() in {"1", "true", "yes", "on"}
 CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()
 GUILD_ID = os.getenv("DISCORD_GUILD_ID", "").strip()
 META_PANEL_CHANNEL_ID = os.getenv("META_PANEL_CHANNEL_ID", "").strip()
@@ -111,8 +112,7 @@ def find_identification_storage_channel(guild: discord.Guild) -> discord.TextCha
 class StrykeBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        # Needed to archive identification messages sent manually in the dedicated channel.
-        intents.message_content = True
+        intents.message_content = CAPTURE_MANUAL_IDENTIFICATIONS
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -158,6 +158,7 @@ class StrykeBot(commands.Bot):
     async def on_message(self, message: discord.Message):
         if (
             message.guild is None
+            or not CAPTURE_MANUAL_IDENTIFICATIONS
             or message.author.bot
             or not isinstance(message.channel, discord.TextChannel)
         ):
@@ -408,6 +409,11 @@ class StrykeBot(commands.Bot):
                     continue
                 if message.author.bot:
                     continue
+                if not CAPTURE_MANUAL_IDENTIFICATIONS:
+                    log.warning(
+                        "Há identificações manuais no canal público; ative CAPTURE_MANUAL_IDENTIFICATIONS e Message Content Intent para arquivá-las. O canal não será limpo."
+                    )
+                    return False
                 if not await self.archive_manual_identification_message(
                     message,
                     storage_channel,
