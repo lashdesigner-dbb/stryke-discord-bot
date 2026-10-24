@@ -117,6 +117,18 @@ def can_review_identification(member: discord.Member) -> bool:
     return any(role in member.roles for role in manager_roles)
 
 
+def identification_nickname(passport: str, name: str) -> str:
+    """Put the passport before the name within Discord's 32-character nickname limit."""
+    passport = passport.strip()
+    name = name.strip()
+    if len(passport) >= 32:
+        return passport[:32]
+    available_for_name = 32 - len(passport) - 3  # " | "
+    if available_for_name > 0:
+        return f"{passport} | {name[:available_for_name]}"
+    return f"{passport} {name[:max(0, 31 - len(passport))]}"
+
+
 def find_identification_storage_channel(guild: discord.Guild) -> discord.TextChannel | None:
     state = load_state().get(str(guild.id), {})
     configured_id = str(state.get("identification_storage_channel_id", "")).strip()
@@ -169,6 +181,9 @@ class StrykeBot(commands.Bot):
             persist_discovered_ids(guild)
             await self.ensure_panel(guild)
             await self.ensure_identification_panel(guild)
+            storage_channel = find_identification_storage_channel(guild)
+            if storage_channel is not None:
+                await self.migrate_identification_nicknames(guild, storage_channel)
             await self.ensure_weekly_meta_controls(guild)
             repaired = await reconcile_farme_ticket_permissions(guild)
             if repaired:
@@ -450,6 +465,65 @@ class StrykeBot(commands.Bot):
         except discord.HTTPException:
             log.exception("Falha ao arquivar as identificações; as mensagens públicas serão preservadas.")
             return False
+
+    async def migrate_identification_nicknames(
+        self,
+        guild: discord.Guild,
+        storage_channel: discord.TextChannel,
+    ) -> None:
+        """Update current members from their newest approved archived identification."""
+        state = load_state()
+        guild_state = state.setdefault(str(guild.id), {})
+        migration = guild_state.setdefault("identification_nickname_migration_v1", {"processed_user_ids": []})
+        processed = set(str(user_id) for user_id in migration.get("processed_user_ids", []))
+        seen: set[str] = set()
+        field_pattern = re.compile(r"^🪪 Cadastro de identificação #\d+$")
+        footer_pattern = re.compile(r"ID (\d+) · STRYKE ID (\d+):(\d+)$")
+
+        try:
+            async for message in storage_channel.history(limit=None):
+                for embed in message.embeds:
+                    if not field_pattern.match(embed.title or ""):
+                        continue
+                    footer = embed.footer.text if embed.footer else ""
+                    match = footer_pattern.search(footer)
+                    if not match:
+                        continue
+                    user_id = match.group(1)
+                    if user_id in seen:
+                        continue
+                    if user_id in processed:
+                        seen.add(user_id)
+                        continue
+                    fields = {field.name: field.value.strip() for field in embed.fields}
+                    if not fields.get("Status", "").startswith("✅"):
+                        continue
+                    passport = fields.get("Passaporte", "")
+                    name = fields.get("Nome", "")
+                    if not passport or not name:
+                        log.warning("Cadastro aprovado sem passaporte ou nome para o membro %s.", user_id)
+                        continue
+                    seen.add(user_id)
+                    try:
+                        member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
+                        nickname = identification_nickname(passport, name)
+                        if member.nick != nickname:
+                            await member.edit(
+                                nick=nickname,
+                                reason="Atualizar apelido pelo passaporte da identificação aprovada",
+                            )
+                        processed.add(user_id)
+                        migration["processed_user_ids"] = sorted(processed)
+                        save_state(state)
+                    except discord.NotFound:
+                        log.info("Membro %s de identificação aprovada não está mais no servidor; apelido não atualizado.", user_id)
+                    except discord.Forbidden:
+                        log.warning("Sem permissão ou hierarquia para atualizar o apelido do membro %s.", user_id)
+                    except discord.HTTPException:
+                        log.exception("Falha ao atualizar o apelido do membro %s a partir da identificação aprovada.", user_id)
+            log.info("Migração de apelidos de identificação concluída; %d membro(s) atualizado(s) ou já corretos.", len(processed))
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Não foi possível percorrer o canal de identificações para atualizar apelidos antigos.")
 
     async def ensure_identification_panel(self, guild: discord.Guild) -> bool:
         channel = find_text_channel(guild, IDENTIFICATION_NAME)
@@ -1597,9 +1671,12 @@ class IdentificationReviewView(discord.ui.View):
         embed = interaction.message.embeds[0]
         footer = embed.footer.text if embed.footer else ""
         match = re.search(r"ID (\d+) · STRYKE ID (\d+):(\d+)$", footer)
-        name = next((field.value for field in embed.fields if field.name == "Nome"), "")[:32]
-        if not match or not name:
-            return await interaction.response.send_message("O cadastro não contém o usuário ou nome esperado; não apliquei alterações.", ephemeral=True)
+        fields = {field.name: field.value.strip() for field in embed.fields}
+        name = fields.get("Nome", "")
+        passport = fields.get("Passaporte", "")
+        if not match or not name or not passport:
+            return await interaction.response.send_message("O cadastro não contém o usuário, passaporte ou nome esperado; não apliquei alterações.", ephemeral=True)
+        nickname = identification_nickname(passport, name)
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
         try:
@@ -1614,7 +1691,7 @@ class IdentificationReviewView(discord.ui.View):
         try:
             if member_role not in member.roles:
                 await member.add_roles(member_role, reason=f"Identificação STRYKE #{match.group(3)} aprovada por {reviewer}")
-            await member.edit(nick=name, reason=f"Identificação STRYKE #{match.group(3)} aprovada por {reviewer}")
+            await member.edit(nick=nickname, reason=f"Identificação STRYKE #{match.group(3)} aprovada por {reviewer}")
         except discord.Forbidden:
             return await interaction.followup.send("O Discord negou a atribuição do cargo ou alteração do apelido. Confira as permissões e a hierarquia do bot; o cadastro continua pendente.", ephemeral=True)
         except discord.HTTPException:
@@ -1624,7 +1701,7 @@ class IdentificationReviewView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.message.edit(embed=self._marked_embed(embed, "✅ Aprovada", reviewer), view=self)
-        await interaction.followup.send(f"Cadastro aprovado. Cargo `Membro` e apelido **{name}** aplicados a {member.mention}.", ephemeral=True)
+        await interaction.followup.send(f"Cadastro aprovado. Cargo `Membro` e apelido **{nickname}** aplicados a {member.mention}.", ephemeral=True)
 
     @discord.ui.button(label="Recusar", emoji="❌", style=discord.ButtonStyle.danger, custom_id="stryke:identification:reject:v1")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
