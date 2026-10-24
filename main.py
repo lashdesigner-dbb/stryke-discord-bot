@@ -480,7 +480,7 @@ class StrykeBot(commands.Bot):
         field_pattern = re.compile(r"^🪪 Cadastro de identificação #\d+$")
         footer_pattern = re.compile(r"ID (\d+) · STRYKE ID (\d+):(\d+)$")
         sender_pattern = re.compile(r"\(ID (\d+)\)")
-        text_field_pattern = re.compile(r"(?im)(?:^|[\n|•])\s*\*{0,2}(Nome|Passaporte)\*{0,2}\s*\*{0,2}[:=\-]\*{0,2}\s*([^\n|•]+)")
+        text_field_pattern = re.compile(r"(?im)(?:^|[\n|•])\s*\*{0,2}(Nome|Passaporte|ID)\*{0,2}\s*\*{0,2}[:=\-]\*{0,2}\s*([^\n|•]+)")
 
         try:
             async for message in storage_channel.history(limit=None):
@@ -516,6 +516,8 @@ class StrykeBot(commands.Bot):
                             source_embed.description or ""
                             for source_embed in message.embeds
                         )
+                        if original_text.lstrip().lower().startswith("exemplo"):
+                            continue
                         for label, value in text_field_pattern.findall(original_text):
                             fields.setdefault(norm(label), value.strip().strip("`*_ "))
                     def get_field(label: str) -> str:
@@ -528,7 +530,7 @@ class StrykeBot(commands.Bot):
                     status = get_field("Status")
                     if status and not (status.startswith("✅") or norm(status).startswith("aprov")):
                         continue
-                    passport = get_field("Passaporte")
+                    passport = get_field("Passaporte") or get_field("ID")
                     name = get_field("Nome")
                     if not passport or not name:
                         log.warning(
@@ -539,8 +541,6 @@ class StrykeBot(commands.Bot):
                         continue
                     try:
                         member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
-                        if not status and not any(norm(role.name) == norm("Membro") for role in member.roles):
-                            continue
                         seen.add(user_id)
                         nickname = identification_nickname(passport, name)
                         if member.nick != nickname:
