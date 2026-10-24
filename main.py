@@ -493,6 +493,8 @@ class StrykeBot(commands.Bot):
                         footer = embed.footer.text if embed.footer else ""
                         match = footer_pattern.search(footer)
                         if not match:
+                            match = sender_pattern.search(footer)
+                        if not match:
                             sender = next(
                                 (field.value for source_embed in message.embeds for field in source_embed.fields
                                  if norm(field.name) == norm("Enviado por")),
