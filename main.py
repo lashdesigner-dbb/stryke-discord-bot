@@ -479,7 +479,7 @@ class StrykeBot(commands.Bot):
         seen: set[str] = set()
         field_pattern = re.compile(r"^🪪 Cadastro de identificação #\d+$")
         footer_pattern = re.compile(r"ID (\d+) · STRYKE ID (\d+):(\d+)$")
-        sender_pattern = re.compile(r"\(ID (\d+)\)")
+        sender_pattern = re.compile(r"(?:\(\s*ID |·\s*ID )(\d+)")
         text_field_pattern = re.compile(r"(?im)(?:^|[\n|•])\s*\*{0,2}(Nome|Passaporte|ID)\*{0,2}\s*\*{0,2}[:=\-]\*{0,2}\s*([^\n|•]+)")
 
         try:
@@ -492,6 +492,13 @@ class StrykeBot(commands.Bot):
                     if is_form:
                         footer = embed.footer.text if embed.footer else ""
                         match = footer_pattern.search(footer)
+                        if not match:
+                            sender = next(
+                                (field.value for source_embed in message.embeds for field in source_embed.fields
+                                 if norm(field.name) == norm("Enviado por")),
+                                "",
+                            )
+                            match = sender_pattern.search(sender)
                         if not match:
                             continue
                         user_id = match.group(1)
