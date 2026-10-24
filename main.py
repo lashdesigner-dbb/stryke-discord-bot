@@ -112,6 +112,11 @@ def identification_manager_roles(guild: discord.Guild) -> tuple[discord.Role | N
     return manager_role, allowed_roles
 
 
+def can_review_identification(member: discord.Member) -> bool:
+    _, manager_roles = identification_manager_roles(member.guild)
+    return any(role in member.roles for role in manager_roles)
+
+
 def find_identification_storage_channel(guild: discord.Guild) -> discord.TextChannel | None:
     state = load_state().get(str(guild.id), {})
     configured_id = str(state.get("identification_storage_channel_id", "")).strip()
@@ -137,6 +142,7 @@ class StrykeBot(commands.Bot):
         self.add_view(CloseTicketView())
         self.add_view(MetaTrackerView())
         self.add_view(IdentificationPanelView())
+        self.add_view(IdentificationReviewView())
         self.add_view(WeeklyMetaControlView())
         if GUILD_ID.isdigit():
             guild = discord.Object(id=int(GUILD_ID))
@@ -1526,9 +1532,14 @@ class IdentificationModal(discord.ui.Modal, title="Cadastro de identificação")
             )
             for label, value in values.items():
                 embed.add_field(name=label, value=value, inline=(label != "Cell (in game)"))
+            embed.add_field(name="Status", value="⏳ Aguardando análise", inline=False)
             embed.set_footer(text=f"Enviado por {interaction.user.display_name} · ID {interaction.user.id} · STRYKE ID {guild.id}:{number}")
             try:
-                await destination.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                await destination.send(
+                    embed=embed,
+                    view=IdentificationReviewView(),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
             except discord.Forbidden:
                 return await interaction.followup.send(
                     f"Não consigo publicar o cadastro #{number:04d}. Avise um administrador para conferir minhas permissões.",
@@ -1540,64 +1551,90 @@ class IdentificationModal(discord.ui.Modal, title="Cadastro de identificação")
                     f"O Discord não conseguiu publicar o cadastro #{number:04d}. Tente novamente.",
                     ephemeral=True,
                 )
-        member = interaction.user
-        member_role_matches = [role for role in guild.roles if norm(role.name) == norm("Membro")]
-        role_updated = False
-        nickname_updated = False
-        update_errors: list[str] = []
+        await interaction.followup.send(
+            f"Cadastro #{number:04d} enviado para análise. Você receberá a aprovação da equipe.",
+            ephemeral=True,
+        )
 
-        bot_member = guild.me
-        manageable_member_roles = [
-            role
-            for role in member_role_matches
-            if not role.managed and bot_member is not None and role.position < bot_member.top_role.position
-        ]
-        if not manageable_member_roles:
-            update_errors.append("não encontrei um cargo `Membro` abaixo do meu cargo na hierarquia")
-            log.warning(
-                "Cadastro #%04d enviado, mas não foi possível resolver um cargo Membro administrável (%d correspondências).",
-                number,
-                len(member_role_matches),
-            )
+
+class IdentificationReviewView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _reviewer(self, interaction: discord.Interaction) -> discord.Member | None:
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Esta ação só pode ser usada dentro do servidor.", ephemeral=True)
+            return None
+        if not can_review_identification(interaction.user):
+            await interaction.response.send_message("Somente o cargo de identificação ou a gerência pode decidir este cadastro.", ephemeral=True)
+            return None
+        if not isinstance(interaction.message, discord.Message) or not interaction.message.embeds:
+            await interaction.response.send_message("Não consegui localizar os dados deste cadastro.", ephemeral=True)
+            return None
+        status = next((field.value for field in interaction.message.embeds[0].fields if field.name == "Status"), "⏳ Aguardando análise")
+        if status != "⏳ Aguardando análise":
+            await interaction.response.send_message(f"Este cadastro já foi decidido: {status}.", ephemeral=True)
+            return None
+        return interaction.user
+
+    def _marked_embed(self, original: discord.Embed, status: str, reviewer: discord.Member) -> discord.Embed:
+        embed = original.copy()
+        for index, field in enumerate(embed.fields):
+            if field.name == "Status":
+                embed.set_field_at(index, name="Status", value=status, inline=False)
+                break
         else:
-            member_role = max(manageable_member_roles, key=lambda role: role.position)
-            if len(manageable_member_roles) > 1:
-                log.warning(
-                    "Mais de um cargo Membro pode ser administrado; usando o mais alto (%s) após identificação #%04d.",
-                    member_role.id,
-                    number,
-                )
-            if member_role not in member.roles:
-                try:
-                    await member.add_roles(member_role, reason=f"Identificação STRYKE #{number:04d} concluída")
-                except discord.Forbidden:
-                    update_errors.append("não consegui atribuir o cargo `Membro`; confira minha permissão e a hierarquia dos cargos")
-                    log.exception("Sem permissão para atribuir o cargo Membro após identificação #%04d.", number)
-                except discord.HTTPException:
-                    update_errors.append("o Discord não conseguiu atribuir o cargo `Membro`")
-                    log.exception("Falha ao atribuir o cargo Membro após identificação #%04d.", number)
-                else:
-                    role_updated = True
-            else:
-                role_updated = True
+            embed.add_field(name="Status", value=status, inline=False)
+        embed.add_field(name="Decidido por", value=reviewer.mention, inline=False)
+        embed.color = discord.Color.green() if status.startswith("✅") else discord.Color.red()
+        return embed
 
-        nickname = values["Nome"][:32]
+    @discord.ui.button(label="Aceitar", emoji="✅", style=discord.ButtonStyle.success, custom_id="stryke:identification:approve:v1")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        reviewer = await self._reviewer(interaction)
+        if reviewer is None:
+            return
+        embed = interaction.message.embeds[0]
+        footer = embed.footer.text if embed.footer else ""
+        match = re.search(r"ID (\d+) · STRYKE ID (\d+):(\d+)$", footer)
+        name = next((field.value for field in embed.fields if field.name == "Nome"), "")[:32]
+        if not match or not name:
+            return await interaction.response.send_message("O cadastro não contém o usuário ou nome esperado; não apliquei alterações.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
         try:
-            await member.edit(nick=nickname, reason=f"Identificação STRYKE #{number:04d} concluída")
+            member = guild.get_member(int(match.group(1))) or await guild.fetch_member(int(match.group(1)))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return await interaction.followup.send("Não localizei o membro no servidor; o cadastro continua pendente.", ephemeral=True)
+        bot_member = guild.me
+        roles = [role for role in guild.roles if norm(role.name) == norm("Membro") and not role.managed and bot_member and role < bot_member.top_role]
+        if not roles:
+            return await interaction.followup.send("Não encontrei um cargo `Membro` que o bot possa atribuir; o cadastro continua pendente.", ephemeral=True)
+        member_role = max(roles, key=lambda role: role.position)
+        try:
+            if member_role not in member.roles:
+                await member.add_roles(member_role, reason=f"Identificação STRYKE #{match.group(3)} aprovada por {reviewer}")
+            await member.edit(nick=name, reason=f"Identificação STRYKE #{match.group(3)} aprovada por {reviewer}")
         except discord.Forbidden:
-            update_errors.append("não consegui atualizar seu apelido; confira minha permissão de gerenciar apelidos")
-            log.exception("Sem permissão para atualizar o apelido após identificação #%04d.", number)
+            return await interaction.followup.send("O Discord negou a atribuição do cargo ou alteração do apelido. Confira as permissões e a hierarquia do bot; o cadastro continua pendente.", ephemeral=True)
         except discord.HTTPException:
-            update_errors.append("o Discord não conseguiu atualizar seu apelido")
-            log.exception("Falha ao atualizar o apelido após identificação #%04d.", number)
-        else:
-            nickname_updated = True
+            log.exception("Falha ao aplicar cadastro STRYKE #%s após aprovação.", match.group(3))
+            return await interaction.followup.send("O Discord não conseguiu concluir as alterações; o cadastro continua pendente.", ephemeral=True)
+        button.disabled = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(embed=self._marked_embed(embed, "✅ Aprovada", reviewer), view=self)
+        await interaction.followup.send(f"Cadastro aprovado. Cargo `Membro` e apelido **{name}** aplicados a {member.mention}.", ephemeral=True)
 
-        if role_updated and nickname_updated:
-            message = f"Cadastro #{number:04d} enviado para a equipe. Cargo `Membro` atribuído e apelido atualizado para **{nickname}**."
-        else:
-            message = f"Cadastro #{number:04d} enviado para a equipe, mas " + "; ".join(update_errors) + "."
-        await interaction.followup.send(message, ephemeral=True)
+    @discord.ui.button(label="Recusar", emoji="❌", style=discord.ButtonStyle.danger, custom_id="stryke:identification:reject:v1")
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        reviewer = await self._reviewer(interaction)
+        if reviewer is None:
+            return
+        button.disabled = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=self._marked_embed(interaction.message.embeds[0], "❌ Recusada", reviewer), view=self)
 
 
 class FarmeRecordModal(discord.ui.Modal, title="Registrar farm no ticket"):
@@ -1946,4 +1983,5 @@ if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("DISCORD_TOKEN não está configurado. Copie .env.example para .env e adicione o token localmente; nunca o envie no chat.")
     bot.run(TOKEN, log_handler=None)
+
 
