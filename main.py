@@ -496,7 +496,8 @@ class StrykeBot(commands.Bot):
                         seen.add(user_id)
                         continue
                     fields = {field.name: field.value.strip() for field in embed.fields}
-                    if not fields.get("Status", "").startswith("✅"):
+                    status = fields.get("Status", "")
+                    if status and not (status.startswith("✅") or norm(status).startswith("aprov")):
                         continue
                     passport = fields.get("Passaporte", "")
                     name = fields.get("Nome", "")
@@ -506,6 +507,8 @@ class StrykeBot(commands.Bot):
                     seen.add(user_id)
                     try:
                         member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
+                        if not status and not any(norm(role.name) == norm("Membro") for role in member.roles):
+                            continue
                         nickname = identification_nickname(passport, name)
                         if member.nick != nickname:
                             await member.edit(
