@@ -479,23 +479,45 @@ class StrykeBot(commands.Bot):
         seen: set[str] = set()
         field_pattern = re.compile(r"^🪪 Cadastro de identificação #\d+$")
         footer_pattern = re.compile(r"ID (\d+) · STRYKE ID (\d+):(\d+)$")
+        sender_pattern = re.compile(r"\(ID (\d+)\)")
+        text_field_pattern = re.compile(r"(?im)(?:^|[\n|•])\s*\*{0,2}(Nome|Passaporte)\*{0,2}\s*\*{0,2}[:=\-]\*{0,2}\s*([^\n|•]+)")
 
         try:
             async for message in storage_channel.history(limit=None):
                 for embed in message.embeds:
-                    if not field_pattern.match(embed.title or ""):
+                    is_form = bool(field_pattern.match(embed.title or ""))
+                    is_manual = (embed.title or "") == "🗂️ Identificação enviada fora do formulário"
+                    if not is_form and not is_manual:
                         continue
-                    footer = embed.footer.text if embed.footer else ""
-                    match = footer_pattern.search(footer)
-                    if not match:
-                        continue
-                    user_id = match.group(1)
+                    if is_form:
+                        footer = embed.footer.text if embed.footer else ""
+                        match = footer_pattern.search(footer)
+                        if not match:
+                            continue
+                        user_id = match.group(1)
+                    else:
+                        sender = next((field.value for field in embed.fields if field.name == "Enviado por"), "")
+                        match = sender_pattern.search(sender)
+                        if not match:
+                            continue
+                        user_id = match.group(1)
                     if user_id in seen:
                         continue
                     if user_id in processed:
                         seen.add(user_id)
                         continue
-                    fields = {field.name: field.value.strip() for field in embed.fields}
+                    fields = {
+                        field.name: field.value.strip()
+                        for source_embed in message.embeds
+                        for field in source_embed.fields
+                    }
+                    if is_manual:
+                        original_text = "\n".join(
+                            source_embed.description or ""
+                            for source_embed in message.embeds
+                        )
+                        for label, value in text_field_pattern.findall(original_text):
+                            fields.setdefault(label, value.strip().strip("`*_ "))
                     status = fields.get("Status", "")
                     if status and not (status.startswith("✅") or norm(status).startswith("aprov")):
                         continue
@@ -504,11 +526,11 @@ class StrykeBot(commands.Bot):
                     if not passport or not name:
                         log.warning("Cadastro aprovado sem passaporte ou nome para o membro %s.", user_id)
                         continue
-                    seen.add(user_id)
                     try:
                         member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
                         if not status and not any(norm(role.name) == norm("Membro") for role in member.roles):
                             continue
+                        seen.add(user_id)
                         nickname = identification_nickname(passport, name)
                         if member.nick != nickname:
                             await member.edit(
