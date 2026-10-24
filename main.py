@@ -507,7 +507,7 @@ class StrykeBot(commands.Bot):
                         seen.add(user_id)
                         continue
                     fields = {
-                        field.name: field.value.strip()
+                        norm(field.name): field.value.strip()
                         for source_embed in message.embeds
                         for field in source_embed.fields
                     }
@@ -517,14 +517,25 @@ class StrykeBot(commands.Bot):
                             for source_embed in message.embeds
                         )
                         for label, value in text_field_pattern.findall(original_text):
-                            fields.setdefault(label, value.strip().strip("`*_ "))
-                    status = fields.get("Status", "")
+                            fields.setdefault(norm(label), value.strip().strip("`*_ "))
+                    def get_field(label: str) -> str:
+                        key = norm(label)
+                        return fields.get(key) or next(
+                            (value for field_name, value in fields.items() if key in field_name),
+                            "",
+                        )
+
+                    status = get_field("Status")
                     if status and not (status.startswith("✅") or norm(status).startswith("aprov")):
                         continue
-                    passport = fields.get("Passaporte", "")
-                    name = fields.get("Nome", "")
+                    passport = get_field("Passaporte")
+                    name = get_field("Nome")
                     if not passport or not name:
-                        log.warning("Cadastro aprovado sem passaporte ou nome para o membro %s.", user_id)
+                        log.warning(
+                            "Cadastro aprovado sem passaporte ou nome para o membro %s (campos: %s).",
+                            user_id,
+                            ", ".join(fields.keys()),
+                        )
                         continue
                     try:
                         member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
